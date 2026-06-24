@@ -7,7 +7,7 @@ AWS Batch index.
 import argparse as ap
 from pathlib import Path
 import json
-from netCDF4 import Dataset
+from netCDF4 import Dataset, chartostring
 import numpy as np
 import os
 import datetime
@@ -205,13 +205,29 @@ def process_reach(reach_id, mntdir):
             "where the Z suffix indicates UTC time."
         )
 
-        # Fill as needed
-        consensus_arr_filled = np.where(np.isnan(consensus_arr), FILL_VALUE, consensus_arr)
-        time_arr_filled = [t if t is not None else FILL_VALUE_STR for t in time_arr]
+        consensus_q[:] = np.where(np.isnan(consensus_arr), FILL_VALUE, consensus_arr)
+        consensus_time_str[:] = get_filled_time_arr(time_arr)
 
-        # Write values
-        consensus_q[:] = consensus_arr_filled
-        consensus_time_str[:] = np.array(time_arr_filled, dtype="O")
+
+def get_filled_time_arr(time_arr):
+    if hasattr(time_arr, 'ndim') and time_arr.ndim == 2:
+        time_arr =  chartostring(time_arr)
+        
+    time_arr_filled = []
+    for t in time_arr:
+        if t is None or np.ma.is_masked(t):
+            time_arr_filled.append(FILL_VALUE_STR)
+            continue
+            
+        decoded_str = t.decode('utf-8') if hasattr(t, 'decode') else str(t)
+        cleaned_str = decoded_str.strip()
+        
+        if cleaned_str in ('NaT', ''):
+            time_arr_filled.append(FILL_VALUE_STR)
+        else:
+            time_arr_filled.append(cleaned_str)
+
+    return np.array(time_arr_filled, dtype=object)
 
 
 def run_consensus(mntdir, indices, reachfile):
