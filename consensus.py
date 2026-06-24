@@ -116,6 +116,7 @@ def process_reach(reach_id, mntdir):
                     arr = ds[metadata['qvar']][:].filled(np.nan)
                 except KeyError:
                     print(f"Q data variable ({metadata['qvar']}) not found in {infile}")
+                    continue
 
                 # Skip if array is effectively empty (e.g. busboi all-NA case returns 1x1)
                 if arr.size <= 1:
