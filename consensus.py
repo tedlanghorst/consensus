@@ -7,10 +7,11 @@ AWS Batch index.
 import argparse as ap
 from pathlib import Path
 import json
-from netCDF4 import Dataset
-import numpy as np
 import os
-import datetime
+
+import numpy as np
+import pandas as pd
+from netCDF4 import Dataset, chartostring
 
 ALGO_METADATA = {
     "momma": {"qvar": "Q", "time": "time_str"},
@@ -19,65 +20,74 @@ ALGO_METADATA = {
     "sic4dvar": {"qvar": "Q_da", "time": "times"},
     "busboi": {"qvar": "q/q", "time": "time"},
 }
-# removing sad for version 4
-#    'sad':{
-#        'qvar':'Qa',
-#        'time':'time_str'
-#    },
 
 FILL_VALUE = -999999999999.0
 FILL_VALUE_STR = "no_data"
 CV_THRESH = 0.3
 
 
-def remove_low_cv_and_recalc_consensus(arrs, time_arrs, CV_thresh, included_algos):
-    """
-    For a list of discharge arrays:
-    - Removes arrays with CV < threshold
-    - Recalculates consensus using the remaining arrays
+def get_ts(mnt_dir, reach, algo):
+    col_map = ALGO_METADATA[algo]
 
-    Parameters
-    ----------
-    arrs : list of np.ndarray
-        Discharge arrays from each algorithm.
-    CV_thresh : float
-        Coefficient of variation threshold below which arrays are excluded.
+    reach_algo_fp = mnt_dir / "data" / "flpe" / f"{reach}_{algo}.nc"
+    if not reach_algo_fp.is_file():
+        print(f"FLPE file not found: {reach_algo_fp}")
+        return
 
-    Returns
-    -------
-    np.ndarray
-        Cleaned and recalculated consensus array.
-    """
+    with Dataset(reach_algo_fp) as ds:
+        raw_t = ds[col_map["time"]][:]
 
-    cv_arrs = []
-    cv_included_algos = []
-    cv_time_arrs = []
+        match algo:
+            case "hivdi":
+                raw_t_string = chartostring(raw_t)
+                t = pd.to_datetime(
+                    raw_t_string, format="%Y-%m-%dT%H:%M:%SZ", errors="coerce"
+                )
+            case "sic4dvar":
+                swot_epoch = pd.Timestamp(2000, 1, 1)
+                dts = [pd.Timedelta(d, unit="days") for d in raw_t.filled(np.nan)]
+                t = pd.DatetimeIndex([swot_epoch + dt for dt in dts])
+            case "busboi":
+                swot_epoch = pd.Timestamp(2000, 1, 1)
+                dts = [pd.Timedelta(d, unit="seconds") for d in raw_t.filled(np.nan)]
+                t = pd.DatetimeIndex([swot_epoch + dt for dt in dts])
+            case "momma" | "metroman":
+                t = pd.to_datetime(raw_t, format="%Y-%m-%dT%H:%M:%SZ", errors="coerce")
+            case _:
+                raise NotImplementedError(
+                    f"Algorithm {algo} not implemented in consensus"
+                )
 
-    for i, arr in enumerate(arrs):
-        mean = np.nanmean(arr)
-        std = np.nanstd(arr)
-        cv = std / mean if mean != 0 else np.nan
+        # BUSBOI rounds off the datetimes into just dates so we need to do that for all of them for alignment.
+        t_norm = t.normalize()
 
-        if not np.isnan(cv) and cv > CV_thresh:
-            cv_arrs.append(arr)
-            cv_included_algos.append(included_algos[i])
-            cv_time_arrs.append(time_arrs[i])
+        Q = ds[col_map["qvar"]][:].filled(np.nan)
 
-    if not len(cv_arrs):
-        print(
-            "All algorithms removed due to low CV; returning NaN array and no included algos."
-        )
-        return (
-            np.full_like(arrs[0], np.nan),
-            np.full_like(arrs[0], "no_data", dtype=object),
-            [],
-        )
+    ts = pd.Series(index=t_norm, data=Q).dropna().rename(algo)
 
-    # Compute median consensus
-    consensus_arr = np.nanmedian(np.stack(cv_arrs, axis=0), axis=0)
-    selected_time_arr = time_arrs[0]
+    return ts
 
-    return consensus_arr, selected_time_arr, cv_included_algos
+
+def get_actual_time(mnt_dir, reach):
+    swot_path = mnt_dir / "data" / "input" / "swot" / f"{reach}_SWOT.nc"
+    with Dataset(swot_path) as ds:
+        time_str = chartostring(ds["reach"]["time_str"][:])
+    t = pd.to_datetime(time_str, format="%Y-%m-%dT%H:%M:%SZ", errors="coerce")
+
+    return t
+
+
+def calc_consensus(df: pd.DataFrame):
+    cv = df.std(skipna=True) / df.mean(skipna=True)
+    included = cv[cv > CV_THRESH].index.tolist()
+
+    if not included:
+        return None, []
+
+    consensus = df[included].median(axis=1, skipna=True)
+    consensus.name = "consensus"
+
+    return consensus, included
 
 
 def process_reach(reach_id, mntdir):
@@ -91,89 +101,21 @@ def process_reach(reach_id, mntdir):
     reach_id: int
         ID of reach to process
     """
+    ts_list = [get_ts(mntdir, reach_id, algo) for algo in ALGO_METADATA.keys()]
+    ts_df = pd.concat(ts_list, axis=1)
 
-    print("reach", reach_id)
-    included_algos = []
-    arrs = []
-    time_arrs = []
+    consensus_df, included_algos = calc_consensus(ts_df)
+    actual_times = get_actual_time(mntdir, reach_id)
 
-    for algo, metadata in ALGO_METADATA.items():
-        infile = mntdir / "flpe" / algo / f"{reach_id}_{algo}.nc"
-        if not os.path.exists(infile):
-            continue
-        try:
-            with Dataset(infile, "r") as ds:
-                arr = ds[metadata["qvar"]][:].filled(np.nan)
+    # Since we have to normalize for busboi and drop NaTs for calcs, we reindex on the
+    # normalized datetimes from SWOT and then replace the index with the actual datetimes.
+    # This fills back in all the missing data that we dropped.
+    padded_df = consensus_df.reindex(actual_times.normalize())
+    padded_df.index = actual_times
 
-                # Skip if array is effectively empty (e.g. busboi all-NA case returns 1x1)
-                if arr.size <= 1:
-                    print(
-                        f"  Skipping {algo} for reach {reach_id}: array too small (size={arr.size})"
-                    )
-                    continue
 
-                algo_time = ds.variables[metadata["time"]][:]
-                if algo == "sic4dvar":
-                    mask = np.ma.getmaskarray(algo_time)
-                    valid_indexes = [i for i in range(algo_time.shape[0])]
-
-                    if valid_indexes:
-                        valid_sic_str = [algo_time[i] for i in valid_indexes]
-                        swot_ts = datetime.datetime(2000, 1, 1, 0, 0, 0)
-
-                        valid_sic_str = np.array(valid_sic_str, dtype=float)
-                        valid_sic_str = np.where(
-                            np.ma.getmaskarray(valid_sic_str), np.nan, valid_sic_str
-                        )
-
-                        algo_time = np.array(
-                            [
-                                (swot_ts + datetime.timedelta(days=t)).strftime(
-                                    "%Y-%m-%dT%H:%M:%SZ"
-                                )
-                                if not np.isnan(t)
-                                else None
-                                for t in valid_sic_str
-                            ]
-                        )
-
-                time = algo_time
-
-                # treat negative discharge as NaN
-                arr[arr < 0] = np.nan
-                # ignore algos with no nonnegative discharge
-                if not np.any(arr >= 0):
-                    continue
-
-                arrs.append(arr)
-                time_arrs.append(time)
-                included_algos.append(algo)
-
-        except (IOError, OSError):
-            continue
-
-    if not len(arrs):
-        print(f"No data for reach '{reach_id}'")
-        return
-
-    # Ensure all arrays are the same length — drop any that don't match the majority
-    if len(arrs) > 1:
-        lengths = [len(a) for a in arrs]
-        most_common_len = max(set(lengths), key=lengths.count)
-        keep = [i for i, a in enumerate(arrs) if len(a) == most_common_len]
-        if len(keep) < len(arrs):
-            dropped = [included_algos[i] for i in range(len(arrs)) if i not in keep]
-            print(f"  Dropping {dropped} for reach {reach_id}: length mismatch")
-            arrs = [arrs[i] for i in keep]
-            time_arrs = [time_arrs[i] for i in keep]
-            included_algos = [included_algos[i] for i in keep]
-
-    consensus_arr, time_arr, included_algos = remove_low_cv_and_recalc_consensus(
-        arrs=arrs,
-        time_arrs=time_arrs,
-        CV_thresh=CV_THRESH,
-        included_algos=included_algos,
-    )
+    time_arr = actual_times.strftime("%Y-%m-%dT%H:%M:%SZ").to_numpy()
+    consensus_arr = padded_df.to_numpy()
 
     # Build nc file
     outdir = mntdir / "flpe" / "consensus"
@@ -217,7 +159,7 @@ def process_reach(reach_id, mntdir):
         consensus_arr_filled = np.where(
             np.isnan(consensus_arr), FILL_VALUE, consensus_arr
         )
-        time_arr_filled = [t if t is not None else FILL_VALUE_STR for t in time_arr]
+        time_arr_filled = [t if isinstance(t, str) else FILL_VALUE_STR for t in time_arr]
 
         # Write values
         consensus_q[:] = consensus_arr_filled
