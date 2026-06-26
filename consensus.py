@@ -13,26 +13,11 @@ import os
 import datetime
 
 ALGO_METADATA = {
-    'momma': {
-        'qvar':'Q',
-        'time':'time_str'
-    },
-    'metroman':{
-        'qvar':'average/allq',
-        'time':'time_str'
-    },
-    'hivdi': {
-        'qvar':'reach/Q',
-        'time':'time_str'
-    },
-    'sic4dvar':{
-        'qvar':'Q_da',
-        'time':'times'
-    },
-    'busboi':{
-        'qvar':'q/q',
-        'time':'time'
-    },
+    "momma": {"qvar": "Q", "time": "time_str"},
+    "metroman": {"qvar": "average/allq", "time": "time_str"},
+    "hivdi": {"qvar": "reach/Q", "time": "time_str"},
+    "sic4dvar": {"qvar": "Q_da", "time": "times"},
+    "busboi": {"qvar": "q/q", "time": "time"},
 }
 # removing sad for version 4
 #    'sad':{
@@ -79,8 +64,14 @@ def remove_low_cv_and_recalc_consensus(arrs, time_arrs, CV_thresh, included_algo
             cv_time_arrs.append(time_arrs[i])
 
     if not len(cv_arrs):
-        print("All algorithms removed due to low CV; returning NaN array and no included algos.")
-        return np.full_like(arrs[0], np.nan), np.full_like(arrs[0], "no_data", dtype=object), []
+        print(
+            "All algorithms removed due to low CV; returning NaN array and no included algos."
+        )
+        return (
+            np.full_like(arrs[0], np.nan),
+            np.full_like(arrs[0], "no_data", dtype=object),
+            [],
+        )
 
     # Compute median consensus
     consensus_arr = np.nanmedian(np.stack(cv_arrs, axis=0), axis=0)
@@ -101,26 +92,28 @@ def process_reach(reach_id, mntdir):
         ID of reach to process
     """
 
-    print('reach', reach_id)
+    print("reach", reach_id)
     included_algos = []
     arrs = []
     time_arrs = []
 
     for algo, metadata in ALGO_METADATA.items():
-        infile = mntdir / 'flpe' / algo / f'{reach_id}_{algo}.nc'
+        infile = mntdir / "flpe" / algo / f"{reach_id}_{algo}.nc"
         if not os.path.exists(infile):
             continue
         try:
-            with Dataset(infile, 'r') as ds:
-                arr = ds[metadata['qvar']][:].filled(np.nan)
+            with Dataset(infile, "r") as ds:
+                arr = ds[metadata["qvar"]][:].filled(np.nan)
 
                 # Skip if array is effectively empty (e.g. busboi all-NA case returns 1x1)
                 if arr.size <= 1:
-                    print(f"  Skipping {algo} for reach {reach_id}: array too small (size={arr.size})")
+                    print(
+                        f"  Skipping {algo} for reach {reach_id}: array too small (size={arr.size})"
+                    )
                     continue
 
-                algo_time = ds.variables[metadata['time']][:]
-                if algo == 'sic4dvar':
+                algo_time = ds.variables[metadata["time"]][:]
+                if algo == "sic4dvar":
                     mask = np.ma.getmaskarray(algo_time)
                     valid_indexes = [i for i in range(algo_time.shape[0])]
 
@@ -129,12 +122,20 @@ def process_reach(reach_id, mntdir):
                         swot_ts = datetime.datetime(2000, 1, 1, 0, 0, 0)
 
                         valid_sic_str = np.array(valid_sic_str, dtype=float)
-                        valid_sic_str = np.where(np.ma.getmaskarray(valid_sic_str), np.nan, valid_sic_str)
+                        valid_sic_str = np.where(
+                            np.ma.getmaskarray(valid_sic_str), np.nan, valid_sic_str
+                        )
 
-                        algo_time = np.array([
-                            (swot_ts + datetime.timedelta(days=t)).strftime("%Y-%m-%dT%H:%M:%SZ") if not np.isnan(t) else None
-                            for t in valid_sic_str
-                        ])
+                        algo_time = np.array(
+                            [
+                                (swot_ts + datetime.timedelta(days=t)).strftime(
+                                    "%Y-%m-%dT%H:%M:%SZ"
+                                )
+                                if not np.isnan(t)
+                                else None
+                                for t in valid_sic_str
+                            ]
+                        )
 
                 time = algo_time
 
@@ -163,29 +164,34 @@ def process_reach(reach_id, mntdir):
         if len(keep) < len(arrs):
             dropped = [included_algos[i] for i in range(len(arrs)) if i not in keep]
             print(f"  Dropping {dropped} for reach {reach_id}: length mismatch")
-            arrs           = [arrs[i] for i in keep]
-            time_arrs      = [time_arrs[i] for i in keep]
+            arrs = [arrs[i] for i in keep]
+            time_arrs = [time_arrs[i] for i in keep]
             included_algos = [included_algos[i] for i in keep]
 
     consensus_arr, time_arr, included_algos = remove_low_cv_and_recalc_consensus(
-        arrs=arrs, time_arrs=time_arrs, CV_thresh=CV_THRESH, included_algos=included_algos
+        arrs=arrs,
+        time_arrs=time_arrs,
+        CV_thresh=CV_THRESH,
+        included_algos=included_algos,
     )
 
     # Build nc file
-    outdir = mntdir / 'flpe' / 'consensus'
+    outdir = mntdir / "flpe" / "consensus"
     if not os.path.exists(outdir):
         os.makedirs(outdir, exist_ok=True)
 
-    outfile = outdir / f'{reach_id}_consensus.nc'
+    outfile = outdir / f"{reach_id}_consensus.nc"
 
-    with Dataset(outfile, 'w', format="NETCDF4") as dsout:
+    with Dataset(outfile, "w", format="NETCDF4") as dsout:
         dsout.n_algos = str(len(included_algos))
         dsout.contributing_algos = included_algos
 
         # Add consensus Q
         dsout.createDimension("nt", len(consensus_arr))
-        consensus_q = dsout.createVariable("consensus_q", "f8", ("nt",), fill_value=FILL_VALUE)
-        consensus_q.long_name = 'consensus discharge'
+        consensus_q = dsout.createVariable(
+            "consensus_q", "f8", ("nt",), fill_value=FILL_VALUE
+        )
+        consensus_q.long_name = "consensus discharge"
         consensus_q.short_name = "discharge_consensus"
         consensus_q.tag_basic_expert = "Basic"
         consensus_q.units = "m^3/s"
@@ -194,7 +200,9 @@ def process_reach(reach_id, mntdir):
         consensus_q.comment = "Discharge from the consensus discharge algorithm."
 
         # Add consensus time_str
-        consensus_time_str = dsout.createVariable("time_str", str, ("nt",), fill_value="no_data")
+        consensus_time_str = dsout.createVariable(
+            "time_str", str, ("nt",), fill_value="no_data"
+        )
         consensus_time_str.long_name = "time (UTC)"
         consensus_time_str.standard_name = "time"
         consensus_time_str.short_name = "time_string"
@@ -206,7 +214,9 @@ def process_reach(reach_id, mntdir):
         )
 
         # Fill as needed
-        consensus_arr_filled = np.where(np.isnan(consensus_arr), FILL_VALUE, consensus_arr)
+        consensus_arr_filled = np.where(
+            np.isnan(consensus_arr), FILL_VALUE, consensus_arr
+        )
         time_arr_filled = [t if t is not None else FILL_VALUE_STR for t in time_arr]
 
         # Write values
@@ -226,9 +236,9 @@ def run_consensus(mntdir, indices, reachfile):
         offsets of reaches to process
     """
 
-    with open(reachfile, 'r') as fp:
+    with open(reachfile, "r") as fp:
         reaches = json.load(fp)
-        reach_ids = [reaches[i]['reach_id'] for i in indices]
+        reach_ids = [reaches[i]["reach_id"] for i in indices]
 
     for reach_id in reach_ids:
         process_reach(reach_id, mntdir)
@@ -247,8 +257,10 @@ def parse_range(index_str):
             else:
                 indices.append(int(part))
     except (IndexError, ValueError, TypeError):
-        print(f"cannot parse range string: '{index_str}'. Must be either a single integer, "
-              f"a range such as 1-100, or a comma separated list of integers and/or ranges")
+        print(
+            f"cannot parse range string: '{index_str}'. Must be either a single integer, "
+            f"a range such as 1-100, or a comma separated list of integers and/or ranges"
+        )
 
     return sorted(list(set(indices)))
 
@@ -257,6 +269,8 @@ if __name__ == "__main__":
     parser = ap.ArgumentParser()
     parser.add_argument("--mntdir", type=str, default="/mnt", help="Mount directory.")
     parser.add_argument("-i", "--index", type=parse_range, required=True)
-    parser.add_argument("-r", "--reachfile", type=str, default="reaches.json", help="Reach JSON file.")
+    parser.add_argument(
+        "-r", "--reachfile", type=str, default="reaches.json", help="Reach JSON file."
+    )
     args = parser.parse_args()
     run_consensus(Path(args.mntdir), args.index, args.reachfile)
